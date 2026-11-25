@@ -3159,23 +3159,94 @@
             const hiddenSubj = document.getElementById('docHiddenSubject');
             if (hiddenSubj) {
                 hiddenSubj.value = clean ? clean : 'Обращение с сайта russianfrost.pro';
-            }
+ let preparedDocFile = null;
+
+        function compressImageFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const maxSide = 1600;
+                        let width = img.width;
+                        let height = img.height;
+                        if (width > maxSide || height > maxSide) {
+                            if (width > height) {
+                                height = Math.round((height * maxSide) / width);
+                                width = maxSide;
+                            } else {
+                                width = Math.round((width * maxSide) / height);
+                                height = maxSide;
+                            }
+                        }
+                        const canvas = document.createElement('canvas');
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        canvas.toBlob((blob) => {
+                            if (!blob) return reject(new Error('Ошибка сжатия'));
+                            const cleanName = file.name.replace(/\.[^/.]+$/, '') + '.jpg';
+                            resolve(new File([blob], cleanName, { type: 'image/jpeg' }));
+                        }, 'image/jpeg', 0.82);
+                    };
+                    img.onerror = reject;
+                    img.src = e.target.result;
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
         }
 
-        function onDocFileSelected(input) {
+        async function onDocFileSelected(input) {
             const label = document.getElementById('docFileNameDisplay');
-            if (input.files && input.files.length > 0) {
-                const file = input.files[0];
-                const sizeKb = (file.size / 1024).toFixed(1);
-                label.textContent = `Выбран файл: ${file.name} (${sizeKb} КБ)`;
-                label.classList.add('text-emerald-300');
-            } else {
+            const statusBox = document.getElementById('docStatusBox');
+            preparedDocFile = null;
+
+            if (!input.files || input.files.length === 0) {
                 label.textContent = 'Нажмите, чтобы выбрать файл на устройстве';
-                label.classList.remove('text-emerald-300');
+                label.classList.remove('text-emerald-300', 'text-amber-300');
+                return;
             }
+
+            const rawFile = input.files[0];
+            const maxBytes = 5 * 1024 * 1024;
+            let finalFile = rawFile;
+
+            if (rawFile.type && rawFile.type.startsWith('image/') && rawFile.size > 1.5 * 1024 * 1024) {
+                label.textContent = 'Сжатие фотографии для быстрой отправки...';
+                label.classList.remove('text-emerald-300');
+                label.classList.add('text-amber-300');
+                try {
+                    finalFile = await compressImageFile(rawFile);
+                } catch (e) {
+                    finalFile = rawFile;
+                }
+            }
+
+            if (finalFile.size > maxBytes) {
+                input.value = '';
+                preparedDocFile = null;
+                label.textContent = 'Нажмите, чтобы выбрать файл на устройстве';
+                label.classList.remove('text-emerald-300', 'text-amber-300');
+                statusBox.className = 'rounded-xl p-3.5 text-xs leading-relaxed border bg-rose-500/15 border-rose-400/40 text-rose-200';
+                statusBox.textContent = 'Файл слишком большой (более 5 МБ). Пожалуйста, отправьте его напрямую в WhatsApp (+7 914 027-50-40) или на info@russianfrost.pro.';
+                statusBox.classList.remove('hidden');
+                return;
+            }
+
+            preparedDocFile = finalFile;
+            statusBox.classList.add('hidden');
+            const sizeKb = (finalFile.size / 1024).toFixed(1);
+            const wasCompressed = finalFile !== rawFile ? ' — сжато' : '';
+            label.textContent = `Выбран файл: ${finalFile.name} (${sizeKb} КБ${wasCompressed})`;
+            label.classList.remove('text-amber-300');
+            label.classList.add('text-emerald-300');
         }
 
-        function handleDocumentSubmit(event) {
+        async function handleDocumentSubmit(event) {
+            if (event) event.preventDefault();
+            const form = document.getElementById('documentForm');
             const titleVal = (document.getElementById('docTitleInput').value || '').trim();
             syncDocSubject(titleVal);
 
@@ -3191,21 +3262,40 @@
                 submitBtn.classList.add('opacity-70');
             }
 
-            setTimeout(() => {
-                statusBox.className = 'rounded-xl p-3.5 text-xs leading-relaxed border bg-emerald-500/15 border-emerald-400/40 text-emerald-300';
-                statusBox.textContent = `Обращение («${titleVal || 'Без заголовка'}») отправлено на info@russianfrost.pro.`;
+            try {
+                const formData = new FormData(form);
+                if (preparedDocFile) {
+                    formData.set('attachment', preparedDocFile, preparedDocFile.name);
+                }
+
+                const response = await fetch('https://formsubmit.co/ajax/info@russianfrost.pro', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' },
+                    body: formData
+                });
+
+                const result = await response.json().catch(() => ({}));
+
+                if (response.ok && (result.success === 'true' || result.success === true || !result.message)) {
+                    statusBox.className = 'rounded-xl p-3.5 text-xs leading-relaxed border bg-emerald-500/15 border-emerald-400/40 text-emerald-300';
+                    statusBox.textContent = `Обращение («${titleVal || 'Без заголовка'}») успешно отправлено на info@russianfrost.pro.`;
+                    form.reset();
+                    preparedDocFile = null;
+                    document.getElementById('docFileNameDisplay').textContent = 'Нажмите, чтобы выбрать файл на устройстве';
+                    document.getElementById('docFileNameDisplay').classList.remove('text-emerald-300', 'text-amber-300');
+                } else {
+                    throw new Error(result.message || 'Ошибка сервера');
+                }
+            } catch (err) {
+                statusBox.className = 'rounded-xl p-3.5 text-xs leading-relaxed border bg-rose-500/15 border-rose-400/40 text-rose-200';
+                statusBox.textContent = 'Не удалось отправить обращение. Проверьте подключение к интернету или напишите напрямую в WhatsApp: +7 (914) 027-50-40.';
+            } finally {
                 if (submitBtn) {
                     submitBtn.disabled = false;
                     submitBtn.classList.remove('opacity-70');
                 }
-                setTimeout(() => {
-                    document.getElementById('documentForm').reset();
-                    document.getElementById('docFileNameDisplay').textContent = 'Нажмите, чтобы выбрать файл на устройстве';
-                    document.getElementById('docFileNameDisplay').classList.remove('text-emerald-300');
-                }, 30000);
-            }, 1600);
+            }
         }
-
         function showToast(message) {
             const toast = document.getElementById('toastNotice');
             if (!toast) return;
