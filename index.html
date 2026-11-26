@@ -1555,6 +1555,7 @@
                 <input type="hidden" name="_subject" id="docHiddenSubject" value="Обращение с сайта russianfrost.pro">
                 <input type="hidden" name="_template" value="table">
                 <input type="hidden" name="_captcha" value="false">
+                <input type="hidden" name="_next" value="https://russianfrost.pro/robots.txt">
 
                 <!-- 1. Заголовок (становится темой письма) -->
                 <div>
@@ -3296,6 +3297,18 @@
             });
         }
 
+        function assignFileToInput(input, file) {
+            if (!input || !file) return false;
+            try {
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                input.files = dt.files;
+                return Boolean(input.files && input.files.length > 0 && input.files[0].size === file.size);
+            } catch (e) {
+                return false;
+            }
+        }
+
         async function onDocFileSelected(input) {
             const label = document.getElementById("docFileNameDisplay");
             const clearBtn = document.getElementById("docClearFileBtn");
@@ -3341,6 +3354,11 @@
                 return;
             }
 
+            // Подставляем сжатый файл прямо в input формы для отправки через multipart/form-data
+            if (finalFile !== rawFile) {
+                assignFileToInput(input, finalFile);
+            }
+
             preparedDocFile = finalFile;
             if (statusBox) statusBox.classList.add("hidden");
             if (clearBtn) clearBtn.classList.remove("hidden");
@@ -3363,9 +3381,78 @@
             }
 
             const form = document.getElementById("documentForm");
+            const fileInput = document.getElementById("docFileInput");
             const titleVal = (document.getElementById("docTitleInput").value || "").trim();
             syncDocSubject(titleVal);
 
+            if (typeof navigator !== "undefined" && navigator.onLine === false) {
+                setDocStatus("error", "✕ Нет подключения к интернету. Проверьте сеть или напишите в WhatsApp: +7 (914) 027-50-40.");
+                showToast("✕ Нет подключения к интернету", "error");
+                return;
+            }
+
+            // Если есть файл — отправляем через основной endpoint formsubmit.co (multipart/form-data в скрытый iframe),
+            // потому что /ajax/ у FormSubmit обрезает вложения
+            if (preparedDocFile) {
+                if (fileInput) {
+                    if (!fileInput.files || fileInput.files.length === 0 || fileInput.files[0].size !== preparedDocFile.size) {
+                        assignFileToInput(fileInput, preparedDocFile);
+                    }
+                    if (!fileInput.files || fileInput.files.length === 0 || fileInput.files[0].size > DOC_MAX_BYTES) {
+                        setDocStatus("error", "✕ Браузер не смог прикрепить сжатый файл. Отправьте его в WhatsApp (+7 914 027-50-40) или на info@russianfrost.pro.");
+                        showToast("✕ Ошибка прикрепления файла", "error");
+                        return;
+                    }
+                }
+
+                const iframe = document.getElementById("hiddenFormTransport");
+                const sentName = preparedDocFile.name;
+                const sentSize = formatFileSize(preparedDocFile.size);
+
+                setDocStatus("loading", "Загрузка файла «" + sentName + "» (" + sentSize + ") и отправка на info@russianfrost.pro...");
+                setDocSubmitBtnState(true, "Отправка файла...");
+
+                let finished = false;
+                const cleanup = function () {
+                    if (iframe) iframe.onload = null;
+                    clearTimeout(timerId);
+                };
+
+                const timerId = setTimeout(function () {
+                    if (finished) return;
+                    finished = true;
+                    cleanup();
+                    setDocStatus("error", "✕ Сервер долго не отвечает при загрузке файла. Проверьте интернет или отправьте файл в WhatsApp: +7 (914) 027-50-40.");
+                    showToast("✕ Превышено время загрузки файла", "error");
+                    setDocSubmitBtnState(false, "Отправить");
+                }, 45000);
+
+                if (iframe) {
+                    iframe.onload = function () {
+                        if (finished) return;
+                        finished = true;
+                        cleanup();
+                        setDocStatus("success", "✓ Обращение («" + (titleVal || "Без заголовка") + "») с вложением «" + sentName + "» (" + sentSize + ") успешно отправлено на info@russianfrost.pro.");
+                        showToast("✓ Обращение и файл успешно отправлены!", "success");
+                        form.reset();
+                        preparedDocFile = null;
+                        docFileBlockedTooLarge = false;
+                        const label = document.getElementById("docFileNameDisplay");
+                        const clearBtn = document.getElementById("docClearFileBtn");
+                        if (label) {
+                            label.textContent = "Нажмите, чтобы выбрать файл на устройстве";
+                            label.classList.remove("text-emerald-300", "text-amber-300", "text-rose-400");
+                        }
+                        if (clearBtn) clearBtn.classList.add("hidden");
+                        setDocSubmitBtnState(false, "Отправить");
+                    };
+                }
+
+                HTMLFormElement.prototype.submit.call(form);
+                return;
+            }
+
+            // Без файла — быстрая AJAX-отправка с точным JSON-статусом
             setDocStatus("loading", "Отправка обращения на info@russianfrost.pro...");
             setDocSubmitBtnState(true, "Отправка...");
 
@@ -3375,9 +3462,7 @@
             try {
                 const formData = new FormData(form);
                 formData.delete("attachment");
-                if (preparedDocFile) {
-                    formData.append("attachment", preparedDocFile, preparedDocFile.name);
-                }
+                formData.delete("_next");
 
                 const response = await fetch("https://formsubmit.co/ajax/info@russianfrost.pro", {
                     method: "POST",
@@ -3390,22 +3475,12 @@
                 const isSuccess = response.ok && (result.success === true || result.success === "true");
 
                 if (isSuccess) {
-                    const fileInfo = preparedDocFile ? " (вложение: " + preparedDocFile.name + ")" : "";
-                    setDocStatus("success", "✓ Обращение («" + (titleVal || "Без заголовка") + "»)" + fileInfo + " успешно отправлено на info@russianfrost.pro.");
+                    setDocStatus("success", "✓ Обращение («" + (titleVal || "Без заголовка") + "») успешно отправлено на info@russianfrost.pro.");
                     showToast("✓ Обращение успешно отправлено!", "success");
-                    const sentFile = preparedDocFile;
                     form.reset();
                     preparedDocFile = null;
                     docFileBlockedTooLarge = false;
-                    const label = document.getElementById("docFileNameDisplay");
-                    const clearBtn = document.getElementById("docClearFileBtn");
-                    if (label) {
-                        label.textContent = "Нажмите, чтобы выбрать файл на устройстве";
-                        label.classList.remove("text-emerald-300", "text-amber-300", "text-rose-400");
-                    }
-                    if (clearBtn) clearBtn.classList.add("hidden");
                     setDocSubmitBtnState(false, "Отправить");
-                    void sentFile;
                 } else {
                     throw new Error(result.message || ("Код ответа сервера: " + response.status));
                 }
