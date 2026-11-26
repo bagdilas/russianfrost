@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://russianfrost.pro/sitemap.xml
